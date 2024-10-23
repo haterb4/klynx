@@ -1,6 +1,5 @@
 Nexium the next Generation Clean Architecture based Backend Framework based on Nodejs.
 
-```md
 # DDD Framework Documentation
 
 ## Table of Contents
