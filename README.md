@@ -1,4 +1,4 @@
-Nexium the next Generation Clean Architecture based Backend Framework based on Nodejs.
+Celeron the next Generation Clean Architecture based Backend Framework based on Nodejs.
 
 # DDD Framework Documentation
 
@@ -247,4 +247,3 @@ describe('CreateUserUseCase', () => {
 ## Conclusion
 
 This framework offers a solid structure for building applications using Domain-Driven Design. By leveraging entities, aggregates, repositories, use cases, and controllers, you can easily manage complex business logic while maintaining a clean architecture.
-```

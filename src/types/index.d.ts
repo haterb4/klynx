@@ -1,3 +1,3 @@
-declare module 'klynx' {
+declare module 'celeron' {
     export * from '../dist';
 }

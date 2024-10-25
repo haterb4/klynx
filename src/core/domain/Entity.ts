@@ -1,7 +1,7 @@
 import { v4 } from 'uuid';
 
 export abstract class Entity<T> {
-    protected readonly _id: string;
+    protected  _id: string;
     protected props: T;
   
     constructor(props: T, id?: string) {
@@ -18,5 +18,9 @@ export abstract class Entity<T> {
   
     get id(): string {
       return this._id;
+    }
+
+    set id(id: string) {
+      this._id = id;
     }
 }

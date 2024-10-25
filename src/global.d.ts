@@ -1,1 +1,1 @@
-declare module 'klynx';
+declare module 'celeron';

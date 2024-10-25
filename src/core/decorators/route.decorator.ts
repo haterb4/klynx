@@ -22,18 +22,18 @@ export const route = (method: string, path: string): MethodDecorator => {
     };
 };
 
-export const httpGet = (path: string): MethodDecorator => {
+export const Get = (path: string): MethodDecorator => {
     return route('GET', path);
 };
 
-export const httpPost = (path: string): MethodDecorator => {
+export const Post = (path: string): MethodDecorator => {
     return route('POST', path);
 };
 
-export const httpPut = (path: string): MethodDecorator => {
+export const Put = (path: string): MethodDecorator => {
     return route('PUT', path);
 };
 
-export const httpDelete = (path: string): MethodDecorator => {
+export const Delete = (path: string): MethodDecorator => {
     return route('DELETE', path);
 };
