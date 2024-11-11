@@ -1,45 +1,71 @@
 import { DatabaseConnection } from '../persistence/DatabaseConnection';
 import { Entity } from '../../domain/Entity';
+import { ColumnDefinition, QueryOptions, RelationDefinition } from './types';
+import { ModelMetadataStore } from './orm.metadata.store';
+import { v4 } from 'uuid';
 
-export type ColumnType = 'string' | 'number' | 'boolean' | 'date' | 'json';
-
-export interface ColumnDefinition {
-  type: ColumnType;
-  nullable?: boolean;
-  unique?: boolean;
-  primary?: boolean;
-  default?: any;
-}
-
-export interface RelationDefinition {
-  type: 'hasOne' | 'hasMany' | 'belongsTo' | 'belongsToMany';
-  model: () => typeof Model;
-  foreignKey?: string;
-  through?: string;
-}
-
-export interface QueryOptions {
-  transaction?: boolean;
-  orderBy?: { [key: string]: 'ASC' | 'DESC' };
-  limit?: number;
-  offset?: number;
-  select?: string[];
-}
 
 export class Model extends Entity<any> {
   private static connection: DatabaseConnection;
-  protected static _tableName: string;
+  private static metadataStore = ModelMetadataStore.getInstance();
+
+  private _data: Record<string, any> = {};
+
+  constructor(data: Record<string, any> = {}) {
+    super({});
+    this.fill(data);
+  }
+
+  public fill(data: Record<string, any>): void {
+    const modelClass = this.constructor as typeof Model;
+    const columns = modelClass.columns;
+    
+    // Ne copier que les colonnes définies
+    columns.forEach((definition, columnName) => {
+      if (columnName in data) {
+        this._data[columnName] = data[columnName];
+      }
+    });
+    
+    // Gérer l'ID séparément car il vient de Entity
+    if ('id' in data) {
+      this.id = data.id;
+    }
+    else {
+      this._data["id"] = this.id
+      this.id = ""
+    }
+  }
+
+  public get(key: string): any {
+    return this._data[key];
+  }
+
+  public set(key: string, value: any): void {
+    const modelClass = this.constructor as typeof Model;
+    if (modelClass.columns.has(key)) {
+      this._data[key] = value;
+    }
+  }
+
+  protected static getModelName(): string {
+    return this.name;
+  }
 
   public static get tableName(): string {
-    return this._tableName;
+    return this.metadataStore.getModelDefinition(this.getModelName()).tableName;
   }
 
-  public static set tableName(value: string) {
-    this._tableName = value;
+  public static get columns(): Map<string, ColumnDefinition> {
+    return this.metadataStore.getModelDefinition(this.getModelName()).columns;
+  }
+  
+  public static get relations(): Map<string, RelationDefinition> {
+    return this.metadataStore.getModelDefinition(this.getModelName()).relations;
   }
 
-  private static columns: Map<string, ColumnDefinition> = new Map();
-  private static relations: Map<string, RelationDefinition> = new Map();
+  private static _columns: Map<string, ColumnDefinition> = new Map();
+  private static _relations: Map<string, RelationDefinition> = new Map();
 
   // Gestion de la connexion
   static setConnection(connection: DatabaseConnection) {
@@ -55,16 +81,16 @@ export class Model extends Entity<any> {
 
   // Méthodes de configuration
   static column(name: string, definition: ColumnDefinition) {
-    this.columns.set(name, definition);
+    this._columns.set(name, definition);
   }
 
   static relation(name: string, definition: RelationDefinition) {
-    this.relations.set(name, definition);
+    this._relations.set(name, definition);
   }
 
   // Méthodes de requête améliorées
   static async findById(id: string, options: QueryOptions = {}): Promise<Model | null> {
-    const query = `SELECT ${this.buildSelectClause(options)} FROM ${this._tableName} WHERE id = $1`;
+    const query = `SELECT ${this.buildSelectClause(options)} FROM ${this.tableName} WHERE id = $1`;
     const result = await this.getConnection().query(query, [id], options);
     return result.rows[0] ? this.hydrate(result.rows[0]) : null;
   }
@@ -102,7 +128,7 @@ export class Model extends Entity<any> {
       }
     });
 
-    let query = `SELECT ${this.buildSelectClause(options)} FROM ${this._tableName}`;
+    let query = `SELECT ${this.buildSelectClause(options)} FROM ${this.tableName}`;
     
     if (whereClause.length) {
       query += ` WHERE ${whereClause.join(' AND ')}`;
@@ -161,47 +187,75 @@ export class Model extends Entity<any> {
   async save(options: QueryOptions = {}): Promise<void> {
     if (this.id) {
       await this.update(options);
+      console.log("custom orm ==> Entity update")
     } else {
+      console.log("custom orm ==> Entity creation")
       await this.insert(options);
     }
+  }
+
+  public async create(options: QueryOptions = {}): Promise<void> {
+    const modelClass = this.constructor as typeof Model;
+    const data: {[key: string]: any} = this.toJSON();
+    data.id = this._id || v4()
+    
+    
+    const columns = Object.keys(data);
+    const values = Object.values(data);
+    const placeholders = values.map((_, i) => `$${i + 1}`).join(', ');
+
+    const query = `
+      INSERT INTO ${modelClass.tableName}
+      (${columns.join(', ')})
+      VALUES (${placeholders})
+      RETURNING id
+    `;
+
+    const result = await modelClass.getConnection().query(query, values, options);
+    this.id = result.rows[0].id;
   }
 
   private async insert(options: QueryOptions = {}): Promise<void> {
     const data = this.toJSON();
     delete (data as any).id;
 
-    const columns = Object.keys(data);
+    const _columns = Object.keys(data);
     const values = Object.values(data);
     const placeholders = values.map((_, i) => `$${i + 1}`).join(', ');
 
+    console.log("inserting into", (this.constructor as typeof Model).tableName, "with ", options)
     const query = `
       INSERT INTO ${(this.constructor as typeof Model).tableName}
-      (${columns.join(', ')})
+      (${_columns.join(', ')})
       VALUES (${placeholders})
-      RETURNING id
-    `;
+      RETURNING id;`;
 
     const result = await (this.constructor as typeof Model).getConnection()
       .query(query, values, options);
+      
     this.id = result.rows[0].id;
   }
 
-  private async update(options: QueryOptions = {}): Promise<void> {
+  public async update(options: QueryOptions = {}): Promise<void> {
+    if (!this.id) {
+      throw new Error('Cannot update model without ID');
+    }
+
+    const modelClass = this.constructor as typeof Model;
     const data = this.toJSON();
-    delete (data as any).id;
+    delete (data as any).id;  // Remove ID from update data
 
     const columns = Object.keys(data);
     const values = Object.values(data);
     const setClause = columns.map((col, i) => `${col} = $${i + 1}`).join(', ');
 
     const query = `
-      UPDATE ${(this.constructor as typeof Model).tableName}
+      UPDATE ${modelClass.tableName}
       SET ${setClause}
       WHERE id = $${values.length + 1}
     `;
-
-    await (this.constructor as typeof Model).getConnection()
-      .query(query, [...values, this.id], options);
+    console.log("updating into", (this.constructor as typeof Model).tableName, "with ", options)
+    await modelClass.getConnection().query(query, [...values, this.id], options);
   }
 
   async delete(options: QueryOptions = {}): Promise<void> {
@@ -215,10 +269,10 @@ export class Model extends Entity<any> {
     return this.getConnection().withTransaction(callback);
   }
 
-  // Relations améliorées
+  // _relations améliorées
   async load(relationName: string, options: QueryOptions = {}): Promise<any> {
     const modelConstructor = this.constructor as typeof Model;
-    const relation = modelConstructor.relations.get(relationName);
+    const relation = modelConstructor._relations.get(relationName);
     
     if (!relation) {
       throw new Error(`Relation ${relationName} not found`);
@@ -279,10 +333,19 @@ export class Model extends Entity<any> {
 
 
   toJSON(): object {
-    const json: any = {};
-    (this.constructor as typeof Model).columns.forEach((definition, key) => {
-      json[key] = (this as any)[key];
+    const modelClass = this.constructor as typeof Model;
+    const result: Record<string, any> = {};
+
+    // Inclure toutes les colonnes définies
+    modelClass.columns.forEach((definition, columnName) => {
+      result[columnName] = this._data[columnName];
     });
-    return json;
+
+    // Ajouter l'ID s'il existe
+    if (this.id) {
+      result.id = this.id;
+    }
+
+    return result;
   }
 }

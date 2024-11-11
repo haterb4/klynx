@@ -1,6 +1,7 @@
 import { AwilixContainer, Resolver } from 'awilix';
 import { Pool, PoolClient, QueryResult } from 'pg';
-import { QueryOptions } from '../orm/orm.model';
+import { QueryOptions } from '../orm/types';
+
 
 export interface DatabaseConnectionOptions {
   host: string;

@@ -159,7 +159,7 @@ export class ControllerLoader {
     container: AwilixContainer,
     pattern: string
   ): Promise<void> {
-    const controllerFiles = glob.sync(pattern);
+    const controllerFiles = glob?.sync(pattern);
 
     for (const file of controllerFiles) {
       try {

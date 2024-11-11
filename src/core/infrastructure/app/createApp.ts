@@ -18,6 +18,7 @@ import compression from 'compression';
 import { WebSocketManager } from '../websocket/WebSocketManager';
 import { SwaggerOptions, SwaggerSetup } from '../swagger/SwaggerSetup';
 import path from 'path';
+import { Model } from '../orm/orm.model';
 
 export interface CreateAppOptions {
   container: AwilixContainer;
@@ -54,7 +55,7 @@ export class App {
     return this.wsManager;
   }
 
-  public listen(port: number | string): Promise<void> {
+  public listen(port: number | string = 8001): Promise<void> {
     return new Promise((resolve) => {
       this.server = this.app.listen(port, () => {
         console.log(`Server is running on http://localhost:${port}`);
@@ -126,6 +127,7 @@ export const createApp = async (options: CreateAppOptions): Promise<App> => {
     const dbConnection = new DatabaseConnection(options.databaseConfig);
     await dbConnection.connect();
     options.container.register({ dbConnection: dbConnection });
+    Model.setConnection(dbConnection)
   }
 
   // Load all controllers
