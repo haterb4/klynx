@@ -7,8 +7,9 @@ const metadataStore = ModelMetadataStore.getInstance();
 // Décorateurs
 export function table(tableName: string): ClassDecorator {
   return function (constructor: Function) {
-      metadataStore.registerModel(constructor.name, tableName);
-    };
+    metadataStore.registerModel(constructor.name, tableName);
+    (constructor as typeof Model).prototype.getModelName = function(): string { return constructor.name }
+  };
 }
   
 export function column(definition: ColumnDefinition) {
@@ -23,7 +24,8 @@ export function hasMany(relatedModel: () => typeof Model, options: Partial<Relat
       type: 'hasMany',
       model: relatedModel,
       foreignKey: options.foreignKey || `${target.constructor.name.toLowerCase()}_id`,
-      through: options.through
+      through: options.through,
+      propertyKey
     };
     metadataStore.setRelation(target.constructor.name, propertyKey, relation);
   };
@@ -34,7 +36,8 @@ export function belongsTo(relatedModel: () => typeof Model, options: Partial<Rel
     const relation: RelationDefinition = {
       type: 'belongsTo',
       model: relatedModel,
-      foreignKey: options.foreignKey || `${relatedModel().name.toLowerCase()}_id`
+      foreignKey: options.foreignKey || `${relatedModel().name.toLowerCase()}_id`,
+      propertyKey
     };
     metadataStore.setRelation(target.constructor.name, propertyKey, relation);
   };
@@ -50,7 +53,8 @@ export function belongsToMany(
       type: 'belongsToMany',
       model: relatedModel,
       through,
-      foreignKey: options.foreignKey
+      foreignKey: options.foreignKey,
+      propertyKey
     };
     metadataStore.setRelation(target.constructor.name, propertyKey, relation);
   };

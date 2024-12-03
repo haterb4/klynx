@@ -1,7 +1,7 @@
 import { DatabaseConnection } from '../../persistence/DatabaseConnection';
 import { ModelMetadataStore } from '../orm.metadata.store';
 import { Model } from '../orm.model';
-import { ColumnDefinition, RelationDefinition } from '../types';
+import { ColumnDefinition, ModelDefinition, RelationDefinition } from '../types';
 import { Migration } from './Migration';
 import { MigrationManager } from './MigrationManager';
 
@@ -21,7 +21,7 @@ export class MigrationGenerator {
   async generateAndRunMigrations(): Promise<void> {
     try {
       // 1. Charger d'abord tous les fichiers de modèles pour les enregistrer
-      const models = await this.findModels();
+      await this.findModels();
       
       // 2. Attendre un peu pour s'assurer que les décorateurs sont appliqués
       await new Promise(resolve => setTimeout(resolve, 100));
@@ -35,22 +35,167 @@ export class MigrationGenerator {
       for (const [modelName, definition] of modelDefinitions) {
         const ModelClass = await this.findModelClass(modelName);
         if (ModelClass) {
-          const migration = await this.generateMigrationForModel(ModelClass);
-          if (migration) {
-            const migrationInstance = new migration(this.connection);
-            migrations.push(migrationInstance);
+          // Générer les migrations pour les tables principales
+          const primaryModelMigration = await this.generatePrimaryModelMigration(ModelClass);
+          if (primaryModelMigration) {
+            const primaryModelMigrationInstance = new primaryModelMigration(this.connection);
+            migrations.push(primaryModelMigrationInstance);
+          }
+
+          // Générer les migrations pour les relations belongsToMany
+          const belongsToManyRelations = this.getBelongsToManyRelations(definition);
+          for (const relation of belongsToManyRelations) {
+            const jointTableMigration = await this.generateJointTableMigration(ModelClass, relation);
+            if (jointTableMigration) {
+              const jointTableMigrationInstance = new jointTableMigration(this.connection);
+              migrations.push(jointTableMigrationInstance);
+            }
           }
         }
       }
       
       // 5. Exécuter les migrations via MigrationManager
       const migrationManager = new MigrationManager(this.connection, this.migrationsPath);
-      await migrationManager.migrateWithMigrations(migrations);
+      const primaryMigrations: Migration[] = []
+      const joinMigrations: Migration[] = []
+      for (let migration of migrations){
+        if (`${migration.constructor.name}`.includes('JoinTable')) {
+          joinMigrations.push(migration)
+        }
+        else {
+          primaryMigrations.push(migration)
+        }
+      }
+      
+      const finalmigrations = [...primaryMigrations, ...joinMigrations]
+      await migrationManager.migrateWithMigrations(finalmigrations);
       
     } catch (error) {
       console.error('Error in generateAndRunMigrations:', error);
       throw error;
     }
+  }
+
+  private async generatePrimaryModelMigration(ModelClass: typeof Model): Promise<typeof Migration | undefined> {
+    const modelDefinition = this.metadataStore.getModelDefinition(ModelClass.name);
+    const { tableName, columns } = modelDefinition;
+    const timestamp = new Date().getTime();
+    const className = `Create${tableName}Table_${timestamp}`;
+    const fileName = `${className}.migration.ts`;
+    const filePath = path.join(this.migrationsPath, fileName);
+
+    // Générer le contenu de la migration
+    const migrationContent = this.generatePrimaryModelMigrationContent(className, tableName, columns);
+    await fs.writeFile(filePath, migrationContent);
+
+    // Charger dynamiquement la migration
+    const { default: MigrationClass } = await import(filePath);
+    return MigrationClass;
+  }
+
+  private async generateJointTableMigration(ModelClass: typeof Model, relation: RelationDefinition): Promise<typeof Migration | undefined> {
+    const modelDefinition = this.metadataStore.getModelDefinition(ModelClass.name);
+    const { tableName } = modelDefinition;
+    const relatedModelDefinition = this.metadataStore.getModelDefinition(relation.model().name);
+    const timestamp = new Date().getTime();
+    const className = `CreateJoinTable_${tableName}_${relatedModelDefinition.tableName}_${timestamp}`;
+    const fileName = `${className}.migration.ts`;
+    const filePath = path.join(this.migrationsPath, fileName);
+
+    // Générer le contenu de la migration
+    const migrationContent = this.generateJointTableMigrationContent(className, tableName, relatedModelDefinition.tableName, relation);
+    await fs.writeFile(filePath, migrationContent);
+
+    // Charger dynamiquement la migration
+    const { default: MigrationClass } = await import(filePath);
+    return MigrationClass;
+  }
+
+  private generatePrimaryModelMigrationContent(className: string, tableName: string, columns: Map<string, ColumnDefinition>): string {
+    const columnDefinitions = this.generateColumnDefinitions(columns);
+
+    return `
+      import { DatabaseConnection, Migration } from 'celeron';
+
+      export default class ${className} extends Migration {
+        constructor(connection: DatabaseConnection) {
+          super(connection);
+        }
+
+        async up(): Promise<void> {
+          await this.connection.query(\`
+            CREATE TABLE IF NOT EXISTS ${tableName} (
+              id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+              ${columnDefinitions.join(',\n              ')},
+              created_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP,
+              updated_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP
+            )
+          \`);
+
+          // Créer un trigger pour mettre à jour updated_at
+          await this.connection.query(\`
+            DROP TRIGGER IF EXISTS update_${tableName}_updated_at ON ${tableName};
+          \`);
+          await this.connection.query(\`
+            CREATE TRIGGER update_${tableName}_updated_at
+              BEFORE UPDATE ON ${tableName}
+              FOR EACH ROW
+              EXECUTE FUNCTION update_updated_at_column()
+          \`);
+        }
+
+        async down(): Promise<void> {
+          await this.connection.query('DROP TABLE IF EXISTS ${tableName} CASCADE');
+        }
+      }
+    `;
+  }
+  
+  private generateJointTableMigrationContent(className: string, tableName: string, relatedTableName: string, relation: RelationDefinition): string {
+    const thisKey = `${tableName.toLowerCase()}_id`;
+    const relatedKey = `${relatedTableName.toLowerCase()}_id`;
+
+    return `
+      import { DatabaseConnection, Migration } from 'celeron';
+
+      export default class ${className} extends Migration {
+        constructor(connection: DatabaseConnection) {
+          super(connection);
+        }
+
+        async up(): Promise<void> {
+          await this.connection.query(\`
+            CREATE TABLE IF NOT EXISTS ${relation.through} (
+              id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+              ${thisKey} UUID REFERENCES ${tableName}(id) ON DELETE CASCADE,
+              ${relatedKey} UUID REFERENCES ${relatedTableName}(id) ON DELETE CASCADE,
+              created_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP,
+              updated_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP,
+              UNIQUE(${thisKey}, ${relatedKey})
+            )
+          \`);
+
+          // Créer un trigger pour mettre à jour updated_at
+          await this.connection.query(\`
+            DROP TRIGGER IF EXISTS update_${relation.through}_updated_at ON ${relation.through};
+          \`);
+          await this.connection.query(\`
+            CREATE TRIGGER update_${relation.through}_updated_at
+              BEFORE UPDATE ON ${relation.through}
+              FOR EACH ROW
+              EXECUTE FUNCTION update_updated_at_column()
+          \`);
+        }
+
+        async down(): Promise<void> {
+          await this.connection.query('DROP TABLE IF EXISTS ${relation.through} CASCADE');
+        }
+      }
+    `;
+  }
+
+  private getBelongsToManyRelations(definition: ModelDefinition): RelationDefinition[] {
+    return [...definition.relations.values()].filter(relation => relation.type === 'belongsToMany');
   }
 
   private async findModelClass(modelName: string): Promise<typeof Model | undefined> {
@@ -76,22 +221,6 @@ export class MigrationGenerator {
       console.error('Error finding model class:', error);
     }
     return undefined;
-  }
-
-  private async preloadModels(): Promise<void> {
-    try {
-      const files = await this.getFilesRecursively(this.modelsPath);
-      
-      for (const file of files) {
-        if (file.endsWith('.model.ts') || file.endsWith('.model.js')) {
-          // Importer le fichier pour déclencher les décorateurs
-          await import(file);
-        }
-      }
-    } catch (error) {
-      console.error('Error preloading models:', error);
-      throw error;
-    }
   }
 
   private async findModels(): Promise<typeof Model[]> {
@@ -147,82 +276,10 @@ export class MigrationGenerator {
     );
   }
 
-  private async generateMigrations(models: typeof Model[]): Promise<typeof Migration[]> {
-    const migrations: typeof Migration[] = [];
-    
-    for (const ModelClass of models) {
-      const migration = await this.generateMigrationForModel(ModelClass);
-      migrations.push(migration);
-    }
-    
-    return migrations;
-  }
-
-  private async generateMigrationForModel(ModelClass: typeof Model): Promise<typeof Migration> {
-    const modelMetadata = this.metadataStore.getModelDefinition(ModelClass.name);
-    const tableName = modelMetadata.tableName;
-    const columns = modelMetadata.columns;
-    const relations = modelMetadata.relations;
-    
-    const timestamp = new Date().getTime();
-    const className = `Create${tableName.slice(0, 1).toUpperCase()+tableName.slice(1)}Table_${timestamp}`;
-    const fileName = `${className}.migration.ts`;
-    const filePath = path.join(this.migrationsPath, fileName);
-    
-    // Générer le contenu de la migration
-    const migrationContent = this.generateMigrationContent(className, tableName, columns, relations);
-    
-    // Écrire le fichier de migration
-    await fs.writeFile(filePath, migrationContent);
-    
-    // Importer et retourner la classe de migration
-    const module = await import(filePath);
-    return module.default;
-  }
-
-  private generateMigrationContent(
-    className: string,
-    tableName: string,
-    columns: Map<string, ColumnDefinition>,
-    relations: Map<string, RelationDefinition>
-  ): string {
-    const columnDefinitions: string[] = this.generateColumnDefinitions(columns);
-    const relationDefinitions: string = this.generateRelationDefinitions(tableName, relations);
-    return `
-import { DatabaseConnection, Migration } from 'celeron'
-export class ${className} extends Migration {
-    constructor(connection: DatabaseConnection) {
-        super(connection);
-    }
-
-    async up(): Promise<void> {
-        // Création de la table principale
-        await this.connection.query(\`
-        CREATE TABLE IF NOT EXISTS ${tableName} (
-            id UUID PRIMARY KEY,
-            ${columnDefinitions.join(',\n\t')}
-        )
-        \`);
-
-        // Création des tables de relations
-        ${relationDefinitions}
-    }
-
-    async down(): Promise<void> {
-        // Suppression des tables de relations
-        ${this.generateRelationDropStatements(relations)}
-        
-        // Suppression de la table principale
-        await this.connection.query('DROP TABLE IF EXISTS ${tableName} CASCADE');
-    }
-}
-
-export default ${className};`;
-  }
-
   private generateColumnDefinitions(columns: Map<string, ColumnDefinition>): string[] {
     const definitions: string[] = [];
-    
+    let unique = 0
+    const uniqueString: string[] = []
     columns.forEach((definition, columnName) => {
       let columnDef = `${columnName} ${this.getSqlType(definition.type)}`;
       
@@ -231,7 +288,14 @@ export default ${className};`;
       }
       
       if (definition.unique) {
-        columnDef += ' UNIQUE';
+        if (unique < 1) {
+          columnDef += ' UNIQUE';
+          uniqueString.push(columnName);
+          unique += 1;
+        }
+        else {
+          uniqueString.push(columnName);
+        }
       }
       
       if (definition.default !== undefined) {
@@ -241,6 +305,16 @@ export default ${className};`;
       definitions.push(columnDef);
     });
     
+    if (uniqueString.length > 1) {
+      for (let i=0, c = definitions.length; i < c; i++) {
+        if (definitions[i].includes(' UNIQUE')) {
+          definitions[i] = definitions[i].replace(' UNIQUE', '')
+          break;
+        }
+      }
+      definitions.push(`UNIQUE(${uniqueString.join(', ')})`)
+    }
+
     return definitions;
   }
 
@@ -266,41 +340,5 @@ export default ${className};`;
     }
     
     return String(value);
-  }
-
-  private generateRelationDefinitions(tableName: string, relations: Map<string, RelationDefinition>): string {
-    const definitions: string[] = [];
-    
-    relations.forEach((relation, relationName) => {
-      if (relation.type === 'belongsToMany' && relation.through) {
-        const RelatedModel = relation.model();
-        const relatedModelMetadata = this.metadataStore.getModelDefinition(RelatedModel.name);
-        
-        definitions.push(`
-    await this.connection.query(\`
-      CREATE TABLE IF NOT EXISTS ${relation.through} (
-        id UUID PRIMARY KEY,
-        ${tableName.toLowerCase()}_id UUID NOT NULL REFERENCES ${tableName}(id) ON DELETE CASCADE,
-        ${relatedModelMetadata.tableName.toLowerCase()}_id UUID NOT NULL REFERENCES ${relatedModelMetadata.tableName}(id) ON DELETE CASCADE,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        UNIQUE(${tableName.toLowerCase()}_id, ${relatedModelMetadata.tableName.toLowerCase()}_id)
-      )
-    \`);`);
-      }
-    });
-    
-    return definitions.join('\n');
-  }
-
-  private generateRelationDropStatements(relations: Map<string, RelationDefinition>): string {
-    const statements: string[] = [];
-    
-    relations.forEach((relation) => {
-      if (relation.type === 'belongsToMany' && relation.through) {
-        statements.push(`await this.connection.query('DROP TABLE IF EXISTS ${relation.through} CASCADE');`);
-      }
-    });
-    
-    return statements.join('\n    ');
   }
 }

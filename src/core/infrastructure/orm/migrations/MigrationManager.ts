@@ -1,20 +1,16 @@
 import { DatabaseConnection } from '../../persistence/DatabaseConnection';
-import { Migration } from './Migration';
-import { ModelMetadataStore } from '../orm.metadata.store';
+import { JointTableMigration, Migration } from './Migration';
 import * as path from 'path';
-import * as fs from 'fs/promises';
 
 export class MigrationManager {
-  private metadataStore: ModelMetadataStore;
 
   constructor(
     private connection: DatabaseConnection,
     private migrationsPath: string
-  ) {
-    this.metadataStore = ModelMetadataStore.getInstance();
-  }
+  ) {}
 
   async initialize(): Promise<void> {
+    await this.connection.query('CREATE EXTENSION IF NOT EXISTS "uuid-ossp"');
     await this.connection.query(`
       CREATE TABLE IF NOT EXISTS migrations (
         id SERIAL PRIMARY KEY,
@@ -22,6 +18,15 @@ export class MigrationManager {
         batch INTEGER NOT NULL,
         executed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
+    `);
+    await this.connection.query(`
+      CREATE OR REPLACE FUNCTION update_updated_at_column()
+      RETURNS TRIGGER AS $$
+      BEGIN
+          NEW.updated_at = CURRENT_TIMESTAMP;
+          RETURN NEW;
+      END;
+      $$ language 'plpgsql';
     `);
   }
 
@@ -35,59 +40,48 @@ export class MigrationManager {
 
     const batch = await this.getNextBatch();
 
+    // Exécuter les migrations pour les tables principales
+    await this.runPrimaryModelMigrations(migrations, batch);
+
+    // Exécuter les migrations pour les tables de jonction
+    await this.runJointTableMigrations(migrations, batch);
+  }
+
+  private async runPrimaryModelMigrations(migrations: Migration[], batch: number): Promise<void> {
     await this.connection.withTransaction(async () => {
       for (const migration of migrations) {
-        const migrationName = migration.constructor.name;
-        console.log(`Running migration: ${migrationName}`);
+        if (!(migration instanceof JointTableMigration)) {
+          const migrationName = migration.constructor.name;
+          console.log(`Running migration: ${migrationName}`);
 
-        try {
-          await migration.up();
-          await this.recordMigration(migrationName, batch);
-          console.log(`Completed migration: ${migrationName}`);
-        } catch (error) {
-          console.error(`Error in migration ${migrationName}:`, error);
-          throw error;
+          try {
+            await migration.up();
+            await this.recordMigration(migrationName, batch);
+            console.log(`Completed migration: ${migrationName}`);
+          } catch (error) {
+            console.error(`Error in migration ${migrationName}:`, error);
+            throw error;
+          }
         }
       }
     });
   }
-  
-  async migrate(): Promise<void> {
-    await this.initialize();
 
-    const executedMigrations = await this.getExecutedMigrations();
-    const allModelDefinitions = this.metadataStore.getAllModels();
-    const pendingMigrations: Migration[] = [];
-
-    // Générer les migrations pour les modèles qui n'en ont pas encore
-    for (const [modelName, definition] of allModelDefinitions.entries()) {
-      const migrationName = `Create${definition.tableName}Table`;
-      if (!executedMigrations.includes(migrationName)) {
-        const migration = await this.generateMigration(modelName, definition);
-        pendingMigrations.push(migration);
-      }
-    }
-
-    if (pendingMigrations.length === 0) {
-      console.log('No pending migrations.');
-      return;
-    }
-
-    const batch = await this.getNextBatch();
-
-    // Exécuter les migrations dans une transaction
+  private async runJointTableMigrations(migrations: Migration[], batch: number): Promise<void> {
     await this.connection.withTransaction(async () => {
-      for (const migration of pendingMigrations) {
-        const migrationName = migration.constructor.name;
-        console.log(`Migrating: ${migrationName}`);
+      for (const migration of migrations) {
+        if (migration instanceof JointTableMigration) {
+          const migrationName = migration.constructor.name;
+          console.log(`Running migration: ${migrationName}`);
 
-        try {
-          await migration.up();
-          await this.recordMigration(migrationName, batch);
-          console.log(`Migrated:  ${migrationName}`);
-        } catch (error) {
-          console.error(`Error migrating ${migrationName}:`, error);
-          throw error;
+          try {
+            await migration.up();
+            await this.recordMigration(migrationName, batch);
+            console.log(`Completed migration: ${migrationName}`);
+          } catch (error) {
+            console.error(`Error in migration ${migrationName}:`, error);
+            throw error;
+          }
         }
       }
     });
@@ -118,142 +112,6 @@ export class MigrationManager {
     });
   }
 
-  private async generateMigration(modelName: string, definition: any): Promise<Migration> {
-    const timestamp = new Date().getTime();
-    const className = `Create${definition.tableName}Table_${timestamp}`;
-    const fileName = `${className}.ts`;
-    const filePath = path.join(this.migrationsPath, fileName);
-
-    const migrationContent = this.generateMigrationContent(className, definition);
-    await fs.writeFile(filePath, migrationContent);
-
-    // Charger dynamiquement la migration
-    const { default: MigrationClass } = await import(filePath);
-    return new MigrationClass(this.connection);
-  }
-
-  private generateMigrationContent(className: string, definition: any): string {
-    const { tableName, columns, relations } = definition;
-    const columnDefinitions = this.generateColumnDefinitions(columns);
-    const relationDefinitions = this.generateRelationDefinitions(tableName, relations);
-
-    return `
-      import { DatabaseConnection, Migration } from 'celeron';
-
-      export default class ${className} extends Migration {
-        constructor(connection: DatabaseConnection) {
-          super(connection);
-        }
-
-        async up(): Promise<void> {
-          await this.connection.query(\`
-            CREATE TABLE IF NOT EXISTS ${tableName} (
-              id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-              ${columnDefinitions.join(',\n              ')}
-              created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-              updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-          \`);
-
-          ${relationDefinitions}
-
-          // Créer un trigger pour mettre à jour updated_at
-          await this.connection.query(\`
-            CREATE TRIGGER update_${tableName}_updated_at
-              BEFORE UPDATE ON ${tableName}
-              FOR EACH ROW
-              EXECUTE FUNCTION update_updated_at_column()
-          \`);
-        }
-
-        async down(): Promise<void> {
-          await this.connection.query('DROP TABLE IF EXISTS ${tableName} CASCADE');
-        }
-      }
-    `;
-  }
-
-  private generateColumnDefinitions(columns: Map<string, any>): string[] {
-    const definitions: string[] = [];
-    
-    columns.forEach((definition, columnName) => {
-      let columnDef = `${columnName} ${this.getSqlType(definition.type)}`;
-      
-      if (!definition.nullable) {
-        columnDef += ' NOT NULL';
-      }
-      
-      if (definition.unique) {
-        columnDef += ' UNIQUE';
-      }
-      
-      if (definition.default !== undefined) {
-        columnDef += ` DEFAULT ${this.getDefaultValue(definition.default)}`;
-      }
-      
-      definitions.push(columnDef);
-    });
-    
-    return definitions;
-  }
-
-  private generateRelationDefinitions(tableName: string, relations: Map<string, any>): string {
-    const definitions: string[] = [];
-    
-    relations.forEach((relation, _) => {
-      if (relation.type === 'belongsToMany' && relation.through) {
-        const relatedModelDefinition = this.metadataStore.getModelDefinition(relation.model().name);
-        
-        definitions.push(`
-          await this.connection.query(\`
-            CREATE TABLE IF NOT EXISTS ${relation.through} (
-              id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-              ${tableName.toLowerCase()}_id UUID REFERENCES ${tableName}(id) ON DELETE CASCADE,
-              ${relatedModelDefinition.tableName.toLowerCase()}_id UUID REFERENCES ${relatedModelDefinition.tableName}(id) ON DELETE CASCADE,
-              created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-              updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-              UNIQUE(${tableName.toLowerCase()}_id, ${relatedModelDefinition.tableName.toLowerCase()}_id)
-            )
-          \`);
-          
-          await this.connection.query(\`
-            CREATE TRIGGER update_${relation.through}_updated_at
-              BEFORE UPDATE ON ${relation.through}
-              FOR EACH ROW
-              EXECUTE FUNCTION update_updated_at_column()
-          \`);
-        `);
-      }
-    });
-    
-    return definitions.join('\n');
-  }
-
-  private getSqlType(type: string): string {
-    const typeMap: { [key: string]: string } = {
-      string: 'VARCHAR(255)',
-      number: 'NUMERIC',
-      boolean: 'BOOLEAN',
-      date: 'TIMESTAMP',
-      json: 'JSONB'
-    };
-    
-    return typeMap[type.toLowerCase()] || 'VARCHAR(255)';
-  }
-
-  private getDefaultValue(value: any): string {
-    if (value === null) return 'NULL';
-    if (value === 'CURRENT_TIMESTAMP') return value;
-    if (typeof value === 'string') return `'${value}'`;
-    return String(value);
-  }
-
-  private async getExecutedMigrations(): Promise<string[]> {
-    const result = await this.connection.query(
-      'SELECT name FROM migrations ORDER BY id'
-    );
-    return result.rows.map(row => row.name);
-  }
 
   private async getNextBatch(): Promise<number> {
     const result = await this.connection.query(

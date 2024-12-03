@@ -2,7 +2,8 @@ import { ValidationRule, ValidationRules } from "../types";
 
 export class ValidationError extends Error {
     constructor(public errors: { [key: string]: string[] }) {
-      super('Validation failed');
+      super();
+      throw Error(`Error: ${JSON.stringify(errors)}`)
     }
 }
   

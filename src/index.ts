@@ -19,6 +19,7 @@ export * from './core/domain/events/DomainEvents';
 export * from './core/domain/events/DomainEvent';
 export * from './core/infrastructure/app/createApp';
 export * from './core/infrastructure/app/loadControllers';
+export * from './core/infrastructure/events/EventDispatcher';
 export * from './core/infrastructure/orm/orm.decorator'
 export * from './core/infrastructure/orm/orm.model'
 export * from './core/infrastructure/orm/migrations/Migration'

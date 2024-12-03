@@ -1,7 +1,7 @@
 // createApp.ts
 import 'reflect-metadata';
 import express, { Application } from 'express';
-import { AwilixContainer } from 'awilix';
+import { asClass, asValue, AwilixContainer, createContainer, InjectionMode, Lifetime } from 'awilix';
 import { scopePerRequest } from 'awilix-express';
 import cors from 'cors';
 import http from 'http';
@@ -19,9 +19,10 @@ import { WebSocketManager } from '../websocket/WebSocketManager';
 import { SwaggerOptions, SwaggerSetup } from '../swagger/SwaggerSetup';
 import path from 'path';
 import { Model } from '../orm/orm.model';
+import { registerComponents } from './registerItems';
 
 export interface CreateAppOptions {
-  container: AwilixContainer;
+  container?: AwilixContainer;
   modulesPath: string;
   corsOptions?: cors.CorsOptions;
   databaseConfig?: DatabaseConnectionOptions;
@@ -87,6 +88,50 @@ export class App {
 
 export const createApp = async (options: CreateAppOptions): Promise<App> => {
   const app = express();
+  if (options.container == undefined) {
+    options.container = createContainer({
+      injectionMode: InjectionMode.CLASSIC
+    })
+  }
+
+  const baseDir = options.modulesPath;
+  const pattern = `${path.resolve(baseDir, '..')}/**/*.controller.{ts,js}`;
+  const modelsPattern = `${path.resolve(baseDir, '..')}/**/*.model.{ts,js}`;
+  const reposPattern = `${path.resolve(baseDir, '..')}/**/*.repository.{ts,js}`;
+  const servicePattern = `${path.resolve(baseDir, '..')}/**/*.service.{ts,js}`;
+  const controllerPattern = `${path.resolve(baseDir, '..')}/**/*.controller.{ts,js}`;
+  const components: Record<string, any> = {}
+
+  //register models
+  const models = await registerComponents(modelsPattern, 'model')
+  console.log("Registering models")
+  const modelsKeys = Object.keys(models)
+  for (let key of modelsKeys) {
+    components[key] = asValue(models[key])
+  }
+  //register repositories
+  const repositories = await registerComponents(reposPattern, 'repository')
+  console.log("Registering repositories")
+  const reposKeys = Object.keys(repositories)
+  for (let key of reposKeys) {
+    components[key] = asClass(repositories[key], { lifetime: Lifetime.SINGLETON })
+  }
+  //register services
+  const services = await registerComponents(servicePattern, 'service')
+  console.log("Registering services")
+  const servicesKeys = Object.keys(services)
+  for (let key of servicesKeys) {
+    components[key] = asClass(services[key], { lifetime: Lifetime.SINGLETON })
+  }
+  //register controllers
+  const controllers = await registerComponents(controllerPattern, 'controller')
+  console.log("Registering controllers")
+  const controllersKeys = Object.keys(controllers)
+  for (let key of controllersKeys) {
+    components[key] = asClass(controllers[key], { lifetime: Lifetime.SINGLETON })
+  }
+
+  options.container.register(components)
 
   // Register singletons in container
   container.bind(TransactionManager).toSelf().inSingletonScope();
@@ -122,6 +167,14 @@ export const createApp = async (options: CreateAppOptions): Promise<App> => {
   // Dependency injection middleware
   app.use(scopePerRequest(options.container));
 
+  // Default route for health check
+  app.get('/health', (req: Request, res: Response) => {
+    res.status(200).send({
+      status: 'OK',
+      message: 'Server is running'
+    });
+  });
+
   // Initialize database if config provided
   if (options.databaseConfig) {
     const dbConnection = new DatabaseConnection(options.databaseConfig);
@@ -131,8 +184,7 @@ export const createApp = async (options: CreateAppOptions): Promise<App> => {
   }
 
   // Load all controllers
-  const baseDir = options.modulesPath;
-  const pattern = `${path.resolve(baseDir, '..')}/**/*.controller.{ts,js}`;
+  
   await loadControllers(app, options.container, pattern);
   
   // Setup Swagger après le chargement des contrôleurs

@@ -9,6 +9,8 @@ export class Migration {
   async down(): Promise<void> {}
 }
 
+export class JointTableMigration extends Migration {}
+
 export async function runMigrations(
   connection: DatabaseConnection,
   modelsPath: string,

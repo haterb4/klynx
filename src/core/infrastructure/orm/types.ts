@@ -15,6 +15,7 @@ export interface RelationDefinition {
   model: () => typeof Model;
   foreignKey?: string;
   through?: string;
+  propertyKey: string;
 }
 
 export interface QueryOptions {
@@ -22,7 +23,16 @@ export interface QueryOptions {
   orderBy?: { [key: string]: 'ASC' | 'DESC' };
   limit?: number;
   offset?: number;
+  include?: string[];
   select?: string[];
+  search?: {
+    fields?: string[];
+    term?: string;
+    mode?: 'like' | 'exact' | 'fulltext';
+  };
+  filter?: {
+    [key: string]: any;
+  };
 }
 
 export type ValidationRule = {
@@ -38,4 +48,15 @@ export interface ModelDefinition {
   tableName: string;
   columns: Map<string, ColumnDefinition>;
   relations: Map<string, RelationDefinition>;
+}
+
+export type HookFunction = (model: Model) => Promise<void> | void;
+
+export interface ModelHooks {
+  beforeCreate?: HookFunction[];
+  afterCreate?: HookFunction[];
+  beforeUpdate?: HookFunction[];
+  afterUpdate?: HookFunction[];
+  beforeDelete?: HookFunction[];
+  afterDelete?: HookFunction[];
 }
